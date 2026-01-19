@@ -44,6 +44,7 @@ typedef struct key_field key_field;
 typedef struct value_field val_field;
 
 struct hash_map* hashmap_create();
+void hashmap_destory(hash_map* map);
 bool hashmap_insert(hash_map* map, key_field key, val_field val);
 bool hashmap_get(hash_map* map, key_field key, val_field* val);
 bool hashmap_delete(hash_map* map, key_field key);

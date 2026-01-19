@@ -113,13 +113,13 @@ struct hash_map* hashmap_create()
     map->buckets_cnt = DEFAULT_BUCKET_CNT;
     map->capacity = 2U;
     map->load_factor = 1.0;
-    map->buckets = malloc(map->capacity * sizeof(struct bucket));
+    map->buckets = malloc(map->buckets_cnt * sizeof(struct bucket));
     if (map->buckets == NULL) {
         LOG_ERR("malloc memory for buckets failed.");
         free(map);
         return NULL;
     }
-
+    memset(map->buckets, 0, map->buckets_cnt * sizeof(struct bucket));
     return map;
 }
 
@@ -156,44 +156,34 @@ static void release_bucket(struct bucket* bucket)
         free((void*)(bucket->key.key));
     }
 
+    if ((char*)(bucket->value.value) != NULL) {
+        free((void*)(bucket->value.value));
+    }
+
     free((void*)bucket);
 }
 
-static struct hash_map* rehash(hash_map* map)
+/**
+ * @brief copy key field or value field to dest
+ * 
+ * @param dest_field 
+ * @param src_field
+ */
+static void copy_field(unsigned char* dest_field, unsigned char* src_field)
 {
-    struct bucket* tmp;
-    unsigned long new_bucket_cnt, old_bucket_cnt;
-    unsigned long rehash_size;
-    unsigned long idx;
-    unsigned int hash_value;
-    struct bucket* old_buckets = map->buckets;
-    struct bucket* prev, *p;
-    old_bucket_cnt = map->buckets_cnt;
-    new_bucket_cnt = lower_bound(__prime_list, sizeof(__prime_list) / sizeof(unsigned long), 100);
-    rehash_size = new_bucket_cnt * map->load_factor;
+    key_field* src = (key_field*)src_field;
+    key_field* dest = (key_field*)dest_field;
+    unsigned int type = src->key_type;
 
-    tmp = malloc(rehash_size * sizeof(struct bucket));
-    if (tmp == NULL) {
-        LOG_ERR("malloc memory for resizing hash map failed.");
-        return NULL;
+    dest->key_type = type;
+    dest->key_len = src->key_len;
+    if ((char*)(dest->key)) {
+        free((void*)(dest->key));
     }
 
-    memset(tmp, 0, sizeof(rehash_size * sizeof(struct bucket)));
-    map->buckets = tmp;
-    /* 遍历整个哈希表，把哈希表的内容放到新的哈希表中 */
-    for (idx = 0; idx < old_bucket_cnt; ++idx) {
-        prev = &old_buckets[idx];
-        while(prev->next) {
-            hashmap_insert(map, prev->next->key, prev->next->value);
-            p = prev->next;
-            prev = p->next;
-            release_bucket(p);
-        }
-    }
-
-    map->buckets_cnt = new_bucket_cnt;
-    map->capacity = rehash_size;
-    return map;
+    dest->key = malloc(src->key_len);
+    memset(dest->key, 0, src->key_len);
+    memcpy(dest->key, src->key, src->key_len);
 }
 
 static struct bucket* find_key_node_before(struct bucket* p_prev, key_field key)
@@ -219,15 +209,66 @@ static struct bucket* find_key_node_before(struct bucket* p_prev, key_field key)
     return tmp_prev;
 }
 
-/**
- * @brief copy key field or value field to dest
- * 
- * @param dest_field 
- * @param src_field
- */
-static void copy_field(unsigned char* dest_field, unsigned char* src_field)
+static void insert_element(hash_map* map, key_field* key, val_field* val)
 {
+    struct bucket* prev_target;
+    unsigned int hash_val = hash((char*)(key->key), key->key_len);
+    unsigned long bucket_idx;
+    struct bucket* bucket;
 
+    bucket_idx = hash_val % map->buckets_cnt;
+    bucket = &map->buckets[bucket_idx];
+    prev_target = find_key_node_before(bucket, *key);
+    if (prev_target->next) {
+        copy_field((unsigned char*)(&(prev_target->next->value)), (unsigned char*)(&val));
+    } else {
+        prev_target->next = malloc(sizeof(struct bucket));
+        memset(prev_target->next, 0, sizeof(struct bucket));
+        copy_field((unsigned char*)(&(prev_target->next->value)), (unsigned char*)(&val));
+        copy_field((unsigned char*)(&prev_target->next->key), (unsigned char*)(&key));
+    }
+
+}
+
+static struct hash_map* rehash(hash_map* map)
+{
+    struct bucket* tmp;
+    unsigned long new_bucket_cnt, old_bucket_cnt;
+    unsigned long rehash_size;
+    unsigned long idx;
+    unsigned int hash_value;
+    struct bucket* old_buckets = map->buckets;
+    struct bucket* prev, *p;
+    old_bucket_cnt = map->buckets_cnt;
+    new_bucket_cnt = lower_bound(__prime_list, sizeof(__prime_list) / sizeof(unsigned long), 100);
+    rehash_size = new_bucket_cnt * map->load_factor;
+
+    tmp = malloc(rehash_size * sizeof(struct bucket));
+    if (tmp == NULL) {
+        LOG_ERR("malloc memory for resizing hash map failed.");
+        return NULL;
+    }
+
+    memset(tmp, 0, sizeof(rehash_size * sizeof(struct bucket)));
+    map->buckets_cnt = new_bucket_cnt;
+    map->capacity = rehash_size;
+    map->buckets = tmp;
+    /* 遍历整个哈希表，把哈希表的内容放到新的哈希表中 */
+    for (idx = 0; idx < old_bucket_cnt; ++idx) {
+        prev = &old_buckets[idx];
+        while(prev->next) {
+            insert_element(map, &(prev->next->key), &(prev->next->value));
+            p = prev->next;
+            prev = p->next;
+            release_bucket(p);
+            p = NULL;
+            if (!prev) {
+                break;
+            }
+        }
+    }
+    free(old_buckets);
+    return map;
 }
 
 bool hashmap_insert(hash_map* map, key_field key, val_field val)
@@ -236,34 +277,13 @@ bool hashmap_insert(hash_map* map, key_field key, val_field val)
         return false;
     }
 
-    unsigned int hash_val = hash((char*)(key.key), key.key_len);
-    unsigned long bucket_idx;
-    struct bucket* bucket;
-    struct bucket* target;
-
     if (1 + map->size > map->capacity * map->load_factor) {
         rehash(map);
     }
 
-    bucket_idx = hash_val % map->buckets_cnt;
-    bucket = &map->buckets[bucket_idx];
-    target = find_key_node_before(bucket, key);
-    if (target->next) {
-        memcpy((void*)(&target->next->value), (void*)(&val), sizeof(val_field));
-    } else {
-        target->next = malloc(sizeof(struct bucket));
-        memcpy((void*)(&(target->next->value)), (void*)(&val), sizeof(val_field));
-        char* ptr = (char*)malloc(key.key_len);
-        (target->next->key.key) = (uintptr_t)ptr;
+    insert_element(map, &key, &val);
 
-        if (target->next->key.key) {
-            memcpy((void*)(target->next->key.key), (void*)(key.key), key.key_len);
-            target->next->key.key_type = key.key_type;
-            target->next->key.key_len = key.key_len;
-        } else {
-            return false;
-        }
-    }
+    map->size++;
     return true;
 }
 
@@ -283,7 +303,7 @@ bool hashmap_get(hash_map* map, key_field key, val_field* val)
     target = find_key_node_before(bucket, key);
 
     if (target->next) {
-        memcpy(val, &target->next->value, sizeof(val_field));
+        copy_field(val, &target->next->value);
     } else {
         return false;
     }
@@ -300,18 +320,44 @@ bool hashmap_delete(hash_map* map, key_field key)
     unsigned int hash_val = hash((char*)(key.key), key.key_len);
     unsigned long bucket_idx;
     struct bucket* bucket, *del_bucket;
-    struct bucket* target;
+    struct bucket* prev_target;
 
     bucket_idx = hash_val % map->buckets_cnt;
     bucket = &map->buckets[bucket_idx];
-    target = find_key_node_before(bucket, key);
-    if (target->next) {
-        del_bucket = target->next;
-        target->next = del_bucket->next;
+    prev_target = find_key_node_before(bucket, key);
+    if (prev_target->next) {
+        del_bucket = prev_target->next;
+        prev_target->next = del_bucket->next;
         release_bucket(del_bucket);
     } else {
         return false;
     }
 
     return true;
+}
+
+void hashmap_destory(hash_map* map)
+{
+    if (map == NULL) {
+        return;
+    }
+
+    unsigned long idx;
+    struct bucket* prev_bucket;
+    struct bucket* tmp;
+
+    for (idx = 0; idx < map->buckets_cnt; ++idx) {
+        prev_bucket = &map->buckets[idx];
+        while(prev_bucket->next) {
+            tmp = prev_bucket->next;
+            prev_bucket = tmp->next;
+            release_bucket(tmp);
+            tmp = NULL;
+            if (!prev_bucket) {
+                break;
+            }
+        }
+    }
+    free(map->buckets);
+    free(map);
 }
